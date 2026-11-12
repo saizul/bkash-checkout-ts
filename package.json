@@ -1,0 +1,42 @@
+{
+  "name": "bkash-checkout-ts",
+  "version": "0.1.0",
+  "description": "Typed TypeScript SDK for the bKash Tokenized Checkout API: token caching, create/execute/query payment, refund, search, typed errors and a double-execute guard.",
+  "keywords": ["bkash", "bangladesh", "payment-gateway", "tokenized-checkout", "mobile-financial-service", "ecommerce", "typescript", "sdk"],
+  "author": "Saizul Amin (https://github.com/saizul)",
+  "license": "MIT",
+  "homepage": "https://github.com/saizul/bkash-checkout-ts#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/saizul/bkash-checkout-ts.git" },
+  "bugs": { "url": "https://github.com/saizul/bkash-checkout-ts/issues" },
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/esm/index.d.ts", "default": "./dist/esm/index.js" },
+      "require": { "types": "./dist/cjs/index.d.ts", "default": "./dist/cjs/index.js" }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist/esm", "dist/cjs", "README.md", "CHANGELOG.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "sideEffects": false,
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/write-cjs-package.mjs",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint . && npm run typecheck",
+    "test": "npm run build:test && node scripts/run-tests.mjs",
+    "test:dist": "node scripts/smoke-dist.cjs && node scripts/smoke-dist.mjs",
+    "prepublishOnly": "npm run lint && npm test && npm run build && npm run test:dist"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.10.0",
+    "eslint": "^10.0.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.72.0"
+  }
+}
