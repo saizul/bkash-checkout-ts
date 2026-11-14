@@ -188,5 +188,22 @@ export interface RefundStatusResponse extends BkashStatusFields {
   [key: string]: unknown;
 }
 
+/** Second step of an `authorization` payment: settle it or release the hold. */
+export type ConfirmAction = 'capture' | 'void';
+
+/** Capture or Void Payment response. */
+export interface ConfirmPaymentResponse extends BkashStatusFields {
+  paymentId: string;
+  trxId?: string;
+  /** `Completed` after a capture, `Cancelled` after a void. */
+  transactionStatus?: TransactionStatus;
+  amount?: string;
+  currency?: string;
+  intent?: string;
+  merchantInvoiceNumber?: string;
+  paymentUpdateTime?: string;
+  [key: string]: unknown;
+}
+
 /** Query string bKash appends to `callbackURL`. */
 export type CallbackStatus = 'success' | 'failure' | 'cancel';

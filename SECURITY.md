@@ -21,7 +21,7 @@ rotate it with bKash first.
 ## Scope
 
 In scope: anything in this repository that could lead to double charging, accepting an unpaid order, leaking
-credentials or tokens, or bypassing the double-execute guard or amount check.
+credentials or tokens, or bypassing the double-execute guard, the capture/void guard or the amount check.
 
 Out of scope: vulnerabilities in the bKash platform itself (report those to bKash), and issues that need an attacker
 who already controls your server or credentials.

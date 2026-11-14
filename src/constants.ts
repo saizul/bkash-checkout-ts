@@ -24,7 +24,9 @@ export type BkashOperation =
   | 'queryPayment'
   | 'searchTransaction'
   | 'refund'
-  | 'refundStatus';
+  | 'refundStatus'
+  | 'capturePayment'
+  | 'voidPayment';
 
 export type EndpointPaths = Record<BkashOperation, string>;
 
@@ -38,6 +40,10 @@ export const V2_PATHS: Readonly<EndpointPaths> = Object.freeze({
   searchTransaction: '/v2/tokenized-checkout/general/search-transaction',
   refund: '/v2/tokenized-checkout/refund/payment/transaction',
   refundStatus: '/v2/tokenized-checkout/refund/payment/status',
+  // Auth & Capture: settle or release a payment created with
+  // `intent: 'authorization'` and executed into the `Authorized` state.
+  capturePayment: '/v2/tokenized-checkout/payment/confirm/capture',
+  voidPayment: '/v2/tokenized-checkout/payment/confirm/void',
 });
 
 /** bKash documents a 30 second timeout for every checkout API. */

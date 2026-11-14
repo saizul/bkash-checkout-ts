@@ -198,13 +198,53 @@ export function isBkashError(error: unknown): error is BkashError {
 export class BkashAmountMismatchError extends BkashError {
   readonly expected: string;
   readonly actual: string | undefined;
-  constructor(paymentId: string, expected: string, actual: string | undefined, raw: unknown) {
+  constructor(
+    paymentId: string,
+    expected: string,
+    actual: string | undefined,
+    raw: unknown,
+    operation: BkashOperation = 'executePayment',
+  ) {
     super(`Payment ${paymentId}: expected amount ${expected}, bKash reported ${actual ?? 'none'}`, {
       code: 'AMOUNT_MISMATCH',
-      operation: 'executePayment',
+      operation,
       raw,
     });
     this.expected = expected;
     this.actual = actual;
+  }
+}
+
+/**
+ * A capture or void was refused locally because the payment is already being
+ * confirmed, or was already confirmed the other way (captured when you asked
+ * to void, or voided when you asked to capture).
+ */
+export class BkashConfirmConflictError extends BkashError {
+  readonly paymentId: string;
+  /** The action that was requested. */
+  readonly action: 'capture' | 'void';
+  /** The action already applied to this payment, or `undefined` while one is still in progress. */
+  readonly completedAction: 'capture' | 'void' | undefined;
+  constructor(
+    paymentId: string,
+    action: 'capture' | 'void',
+    completedAction: 'capture' | 'void' | undefined,
+    raw?: unknown,
+  ) {
+    const state =
+      completedAction === undefined
+        ? 'is already being captured or voided'
+        : completedAction === 'capture'
+          ? 'has already been captured'
+          : 'has already been voided';
+    super(`Cannot ${action} payment ${paymentId}: it ${state}`, {
+      code: completedAction === undefined ? 'CONFIRM_IN_PROGRESS' : 'CONFIRM_CONFLICT',
+      operation: action === 'capture' ? 'capturePayment' : 'voidPayment',
+      raw,
+    });
+    this.paymentId = paymentId;
+    this.action = action;
+    this.completedAction = completedAction;
   }
 }

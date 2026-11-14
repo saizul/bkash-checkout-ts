@@ -2,10 +2,13 @@ export { BkashClient } from './client.js';
 export type {
   BkashClientOptions,
   CallOptions,
+  CaptureOptions,
+  ConfirmResult,
   ExecuteOptions,
   ExecuteResult,
   RefundOptions,
   RefundResult,
+  VoidOptions,
 } from './client.js';
 export { handleCallback, parseCallback } from './callback.js';
 export type { CallbackOutcome, CallbackQuery, HandleCallbackOptions, ParsedCallback } from './callback.js';
@@ -31,6 +34,7 @@ export {
   BkashTokenRateLimitError,
   BkashDuplicateExecutionError,
   BkashAmountMismatchError,
+  BkashConfirmConflictError,
   extractStatus,
   toApiError,
   isBkashError,

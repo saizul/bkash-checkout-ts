@@ -79,6 +79,8 @@ export const P = {
   search: '/v2/tokenized-checkout/general/search-transaction',
   refund: '/v2/tokenized-checkout/refund/payment/transaction',
   refundStatus: '/v2/tokenized-checkout/refund/payment/status',
+  capture: '/v2/tokenized-checkout/payment/confirm/capture',
+  void: '/v2/tokenized-checkout/payment/confirm/void',
 } as const;
 
 export const CREDS = {
@@ -153,6 +155,24 @@ export function queryReply(status = 'Completed', paymentId = PAYMENT_ID, amount 
       intent: 'sale',
       merchantInvoice: 'INV-1001',
       ...(status === 'Completed' ? { trxId: 'DIK20PG0H4' } : {}),
+    },
+  };
+}
+
+/** Capture (`Completed`) or Void (`Cancelled`) response. */
+export function confirmReply(status = 'Completed', paymentId = PAYMENT_ID, amount = '2.90'): Reply {
+  return {
+    json: {
+      statusCode: '0000',
+      statusMessage: 'Successful',
+      paymentId,
+      trxId: 'DIK20PG0H4',
+      transactionStatus: status,
+      amount,
+      currency: 'BDT',
+      intent: 'authorization',
+      merchantInvoiceNumber: 'INV-1001',
+      paymentUpdateTime: '2026-09-20T13:02:45:118 GMT+0600',
     },
   };
 }

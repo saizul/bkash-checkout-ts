@@ -8,6 +8,7 @@ import {
 import {
   BkashAmountMismatchError,
   BkashAuthError,
+  BkashConfirmConflictError,
   BkashDuplicateExecutionError,
   BkashError,
   BkashNetworkError,
@@ -21,6 +22,8 @@ import type { TokenStore } from './token-store.js';
 import type {
   Amount,
   CachedToken,
+  ConfirmAction,
+  ConfirmPaymentResponse,
   CreatePaymentInput,
   CreatePaymentResponse,
   ExecutePaymentResponse,
@@ -106,6 +109,49 @@ export type ExecuteResult = ExecutePaymentResponse & {
 
 export type RefundResult = RefundResponse & { source: 'refund' | 'status' };
 
+export interface CaptureOptions {
+  /**
+   * The amount your order expects. When set, a capture that bKash reports
+   * with a different amount throws `BkashAmountMismatchError`. The capture
+   * has already happened at that point: treat it as a reconciliation alarm.
+   */
+  expectedAmount?: Amount;
+  /**
+   * On timeout, network error or "already completed", call Query Payment to
+   * learn whether the capture went through. Default true.
+   */
+  recover?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface VoidOptions {
+  /** On timeout or network error, call Query Payment to learn whether the void went through. Default true. */
+  recover?: boolean;
+  signal?: AbortSignal;
+}
+
+/** Result of `capturePayment` / `voidPayment`, with how it was obtained. */
+export type ConfirmResult = ConfirmPaymentResponse & {
+  action: ConfirmAction;
+  /** `confirm` = from the Capture/Void API, `query` = recovered via Query Payment, `cache` = guard. */
+  source: 'confirm' | 'query' | 'cache';
+};
+
+/** Store keys for capture/void live next to execute keys, so they get a prefix. */
+const CONFIRM_KEY_PREFIX = 'confirm:';
+
+/** `transactionStatus` that each confirm action leaves a payment in. */
+const CONFIRMED_STATUS: Readonly<Record<ConfirmAction, string>> = Object.freeze({
+  capture: 'Completed',
+  void: 'Cancelled',
+});
+
+function actionFromStatus(status: string | undefined): ConfirmAction | undefined {
+  if (status === CONFIRMED_STATUS.capture) return 'capture';
+  if (status === CONFIRMED_STATUS.void) return 'void';
+  return undefined;
+}
+
 /** Client for the bKash Tokenized Checkout API. */
 export class BkashClient {
   readonly environment: BkashEnvironment;
@@ -117,6 +163,7 @@ export class BkashClient {
   private readonly appKey: string;
   private readonly authScheme: 'raw' | 'bearer';
   private readonly allowHttpCallback: boolean;
+  private readonly confirming = new Map<string, { action: ConfirmAction; promise: Promise<ConfirmResult> }>();
 
   constructor(options: BkashClientOptions) {
     for (const key of ['username', 'password', 'appKey', 'appSecret'] as const) {
@@ -282,7 +329,8 @@ export class BkashClient {
           // Keep the lock: the payment may have gone through. Query later.
           throw error;
         }
-        if (q.transactionStatus === 'Completed') {
+        // `Authorized` is the executed state of an `intent: 'authorization'` payment.
+        if (q.transactionStatus === 'Completed' || q.transactionStatus === 'Authorized') {
           const result = this.fromQuery(q);
           await this.guard.complete(paymentId, result);
           return result;
@@ -303,13 +351,131 @@ export class BkashClient {
     return result;
   }
 
-  private checkAmount(paymentId: string, result: ExecuteResult, options: ExecuteOptions): ExecuteResult {
+  private checkAmount<R extends { amount?: string }>(
+    paymentId: string,
+    result: R,
+    options: { expectedAmount?: Amount },
+    operation: BkashOperation = 'executePayment',
+  ): R {
     if (options.expectedAmount === undefined) return result;
     const expected = formatAmount('expectedAmount', options.expectedAmount);
     if (result.amount === undefined || toPaisa(result.amount) !== toPaisa(expected)) {
-      throw new BkashAmountMismatchError(paymentId, expected, result.amount, result);
+      throw new BkashAmountMismatchError(paymentId, expected, result.amount, result, operation);
     }
     return result;
+  }
+
+  // -------------------------------------------------------- auth & capture
+
+  /**
+   * Captures (settles) a payment created with `intent: 'authorization'` and
+   * executed into the `Authorized` state.
+   *
+   * Capture and void share one guard per `paymentId`: concurrent captures
+   * share one request, a repeated capture returns the stored result, and a
+   * capture after a void (or while a void is running) throws
+   * `BkashConfirmConflictError` without calling bKash. On a timeout the
+   * outcome is resolved with Query Payment instead of retrying.
+   */
+  async capturePayment(paymentId: string, options: CaptureOptions = {}): Promise<ConfirmResult> {
+    const result = await this.confirm('capture', paymentId, options.recover, options.signal);
+    return this.checkAmount(paymentId, result, options, 'capturePayment');
+  }
+
+  /**
+   * Voids (releases) an `Authorized` payment so the held amount returns to
+   * the customer. Guarded the same way as `capturePayment`.
+   */
+  async voidPayment(paymentId: string, options: VoidOptions = {}): Promise<ConfirmResult> {
+    return this.confirm('void', paymentId, options.recover, options.signal);
+  }
+
+  private confirm(
+    action: ConfirmAction,
+    paymentId: string,
+    recover: boolean | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<ConfirmResult> {
+    try {
+      requireString('paymentId', paymentId);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const inflight = this.confirming.get(paymentId);
+    if (inflight) {
+      if (inflight.action === action) return inflight.promise;
+      return Promise.reject(new BkashConfirmConflictError(paymentId, action, undefined));
+    }
+
+    // Registered synchronously so concurrent callers in this process join it.
+    const key = CONFIRM_KEY_PREFIX + paymentId;
+    const promise = (async (): Promise<ConfirmResult> => {
+      const outcome = await this.guard.begin(key);
+      if (outcome.kind === 'in_progress') throw new BkashConfirmConflictError(paymentId, action, undefined);
+      if (outcome.kind === 'completed') {
+        const stored = outcome.result as unknown as ConfirmResult;
+        if (stored.action !== action) {
+          throw new BkashConfirmConflictError(paymentId, action, stored.action, stored);
+        }
+        return { ...stored, source: 'cache' };
+      }
+      return this.doConfirm(action, paymentId, key, recover ?? true, signal);
+    })().finally(() => this.confirming.delete(paymentId));
+    this.confirming.set(paymentId, { action, promise });
+    return promise;
+  }
+
+  private async doConfirm(
+    action: ConfirmAction,
+    paymentId: string,
+    key: string,
+    recover: boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<ConfirmResult> {
+    const operation: BkashOperation = action === 'capture' ? 'capturePayment' : 'voidPayment';
+    try {
+      const res = await this.call<ConfirmPaymentResponse>(operation, { paymentId }, signal);
+      const result: ConfirmResult = { ...res, paymentId: res.paymentId ?? paymentId, action, source: 'confirm' };
+      if (res.transactionStatus === undefined || res.transactionStatus === CONFIRMED_STATUS[action]) {
+        await this.store(key, result);
+      } else {
+        // bKash answered without moving the payment; let the caller try again.
+        await this.guard.release(key);
+      }
+      return result;
+    } catch (error) {
+      const unknownOutcome = error instanceof BkashNetworkError;
+      const alreadyDone = error instanceof BkashPaymentAlreadyCompletedError;
+      if (!recover || !(unknownOutcome || alreadyDone)) {
+        if (!unknownOutcome) await this.guard.release(key);
+        throw error;
+      }
+      let q: QueryPaymentResponse;
+      try {
+        q = await this.queryPayment(paymentId, signal ? { signal } : {});
+      } catch {
+        // Keep the lock when the outcome is unknown: the call may have gone through.
+        if (!unknownOutcome) await this.guard.release(key);
+        throw error;
+      }
+      const done = actionFromStatus(q.transactionStatus);
+      if (done === undefined) {
+        // Still Authorized (or expired/failed): nothing was confirmed.
+        await this.guard.release(key);
+        throw error;
+      }
+      const result: ConfirmResult = { ...q, paymentId: q.paymentId ?? paymentId, action: done, source: 'query' };
+      if (q.merchantInvoice !== undefined && result.merchantInvoiceNumber === undefined) {
+        result.merchantInvoiceNumber = q.merchantInvoice;
+      }
+      await this.store(key, result);
+      if (done !== action) throw new BkashConfirmConflictError(paymentId, action, done, q);
+      return result;
+    }
+  }
+
+  private async store(key: string, result: ConfirmResult): Promise<void> {
+    await this.guard.complete(key, result as unknown as ExecutePaymentResponse);
   }
 
   /** Current state of a payment. Use it after an execute timeout and for reconciliation. */
