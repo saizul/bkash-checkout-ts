@@ -39,7 +39,7 @@ SDK handles those details so your callback route stays short.
 ## Features
 
 - **Full checkout surface** - Grant Token, Refresh Token, Create Payment, Execute Payment, Query Payment, Search
-  Transaction, Refund and Refund Status.
+  Transaction, Refund, Refund Status, and Capture / Void for `intent: 'authorization'` payments.
 - **Token caching** - the `id_token` is cached and renewed at the 55th minute, Refresh Token is preferred over Grant
   Token, concurrent callers share one in-flight request, and a local budget stops you from exceeding bKash's
   "two calls per hour" rule (which blocks the app for an hour).
@@ -51,6 +51,9 @@ SDK handles those details so your callback route stays short.
   result is remembered for 24 hours. Pluggable store for Redis or a database.
 - **Outcome recovery** - a timed-out Execute is resolved with Query Payment, a timed-out Refund with Refund Status,
   exactly as the bKash docs recommend.
+- **Auth & Capture** - `capturePayment()` and `voidPayment()` finish an authorized payment. Capture and void share
+  one guard per payment, so a payment can never be both captured and voided, and a timed-out call is resolved with
+  Query Payment.
 - **Amount check** - `expectedAmount` makes Execute fail with `BkashAmountMismatchError` if bKash charged a different
   amount from your order.
 - **Callback helper** - `handleCallback()` parses `paymentID`/`status`, executes only on `success`, and returns one of
@@ -168,6 +171,8 @@ See [Configuration](#configuration) for every option.
 | `searchTransaction(trxId, { signal })` | `POST /v2/tokenized-checkout/general/search-transaction` | `SearchTransactionResponse` |
 | `refund(input, { recover, knownRefundTrxIds, signal })` | `POST /v2/tokenized-checkout/refund/payment/transaction` | `RefundResult` |
 | `refundStatus({ paymentId, trxId }, { signal })` | `POST /v2/tokenized-checkout/refund/payment/status` | `RefundStatusResponse` |
+| `capturePayment(paymentId, { expectedAmount, recover, signal })` | `POST /v2/tokenized-checkout/payment/confirm/capture` | `ConfirmResult` |
+| `voidPayment(paymentId, { recover, signal })` | `POST /v2/tokenized-checkout/payment/confirm/void` | `ConfirmResult` |
 
 You normally never call `grantToken()` or `refreshToken()`: every other method obtains a valid token on its own.
 
@@ -205,6 +210,42 @@ Options: `expectedAmount` (throws `BkashAmountMismatchError` on mismatch), `reco
 completed refund of the same amount with `source: 'status'`. Pass `knownRefundTrxIds` (refunds that existed before)
 so an older refund of the same amount is never mistaken for this one.
 
+#### `capturePayment(paymentId, options)` and `voidPayment(paymentId, options)`
+
+With `intent: 'authorization'`, Execute Payment only holds the amount on the customer's wallet and returns
+`transactionStatus: 'Authorized'` (and `handleCallback` reports `authorized`). Settle the hold with
+`capturePayment()` (status becomes `Completed`) or release it with `voidPayment()` (status becomes `Cancelled`):
+
+```ts
+const outcome = await handleCallback(bkash, req.query, { expectedAmount: order.amount });
+if (outcome.status === 'authorized') {
+  // Later, when the goods ship:
+  const captured = await bkash.capturePayment(outcome.paymentId, { expectedAmount: order.amount });
+  markOrderPaid(order.id, captured.trxId);
+  // Or, if the order is cancelled: await bkash.voidPayment(outcome.paymentId);
+}
+```
+
+Both return the bKash response plus `action` (`capture` or `void`) and `source`:
+
+- `confirm` - from the Capture or Void API,
+- `query` - the call timed out (or bKash said "already completed") and Query Payment showed the final state,
+- `cache` - this payment was already captured or voided through this guard.
+
+Capture and void are guarded together, per `paymentId`, through the same `idempotencyStore` as execute (under the
+key `confirm:<paymentId>`):
+
+- concurrent calls for the same action share one request; a repeated call returns the stored result;
+- a capture after a void, a void after a capture, or either one while the other is still running throws
+  `BkashConfirmConflictError` without calling bKash. `completedAction` tells you what already happened (`undefined`
+  while it is still in progress);
+- an API error releases the lock so you can try again; an unknown outcome (call and query both failed) keeps it until
+  it expires (2 minutes).
+
+`expectedAmount` on capture checks the amount bKash reports and throws `BkashAmountMismatchError`; the capture has
+already happened by then, so treat it as a reconciliation alarm. Check the authorized amount before capturing by
+passing `expectedAmount` to `executePayment` / `handleCallback`.
+
 ### `handleCallback(client, query, options)`
 
 `query` can be `req.query`, a `URLSearchParams`, a raw query string or a full URL. Returns:
@@ -212,6 +253,7 @@ so an older refund of the same amount is never mistaken for this one.
 | `status` | Meaning |
 | --- | --- |
 | `completed` | Executed and bKash reported `Completed`. `payment` holds the response. |
+| `authorized` | Executed an `intent: 'authorization'` payment and bKash reported `Authorized`. Capture or void it. |
 | `not_completed` | Executed but the status was not `Completed`. |
 | `failure` / `cancel` | The customer failed or cancelled; nothing was executed. |
 | `error` | Bad query string, API error or unknown outcome. `error` is a `BkashError`. |
@@ -241,7 +283,8 @@ Every error extends `BkashError` (`code`, `operation`, `httpStatus`, `raw`, `ret
 | `BkashResponseError` | Non-JSON body or an HTTP error without bKash fields. |
 | `BkashTokenRateLimitError` | The local token-call budget is spent. Has `retryAt`. |
 | `BkashDuplicateExecutionError` | Another process holds the execute lock for this payment. |
-| `BkashAmountMismatchError` | `expectedAmount` differs from the charged amount. |
+| `BkashAmountMismatchError` | `expectedAmount` differs from the charged or captured amount. |
+| `BkashConfirmConflictError` | A capture or void was refused because the payment is being, or was, confirmed the other way. |
 
 ```ts
 try {
@@ -298,6 +341,7 @@ Base URLs:
 | Execute Payment | **never** | Query Payment decides |
 | Query Payment, Search Transaction, Refund Status | yes | error |
 | Refund | **never** | Refund Status decides |
+| Capture / Void Payment | **never** | Query Payment decides |
 
 API errors (a JSON failure body from bKash) are never retried. A 401 drops the cached token and resends once, because
 a rejected token means the request was not processed.
@@ -342,6 +386,7 @@ A Redis implementation (`SET NX PX` for `acquire`) is in [examples/redis-stores.
 | [examples/express-checkout.mjs](examples/express-checkout.mjs) | Express checkout and the callback route |
 | [examples/create-payment.mjs](examples/create-payment.mjs) | Create a sandbox payment from the command line |
 | [examples/refund.mjs](examples/refund.mjs) | Partial refund with timeout recovery |
+| [examples/capture.mjs](examples/capture.mjs) | Capture or void an authorized payment |
 | [examples/reconcile.mjs](examples/reconcile.mjs) | Resolve payments whose callback never finished |
 | [examples/redis-stores.mjs](examples/redis-stores.mjs) | Redis-backed token store and execute guard |
 | [examples/commonjs.cjs](examples/commonjs.cjs) | Using the CommonJS build |
@@ -397,8 +442,11 @@ const client = new BkashClient({
   default is the raw token; switch with `authScheme: 'bearer'`.
 - **Legacy API.** Only the v2 paths are built in. Older `v1.2.0-beta` integrations use other paths and field names
   (`paymentID`, `trxID`); `paths` can be overridden, but field names are not translated.
-- **Agreement, Auth & Capture.** Agreement creation, payment with agreement, capture and void are not wrapped yet.
-  The `intent: 'authorization'` value is accepted, but capture must be called by you.
+- **Agreement.** Agreement creation and payment with agreement are not wrapped yet.
+- **Capture and Void paths.** `payment/confirm/capture` and `payment/confirm/void` with the body `{ paymentId }` are
+  modelled on the bKash Auth & Capture API and have not been checked against the live API. Confirm them in the
+  sandbox and override `paths.capturePayment` / `paths.voidPayment` if your onboarding sheet differs. A `Cancelled` payment is
+  treated as voided, even when the hold was released by bKash rather than by you.
 - **Error catalogue.** Only error codes printed in the docs samples are described. Unknown codes still raise
   `BkashApiError` with `category: 'unknown'`.
 - **Callback signature.** Not verified (algorithm not published).

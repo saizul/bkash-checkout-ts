@@ -44,6 +44,8 @@ export const DEFAULT_RETRY: Readonly<RetryOptions> = Object.freeze({
 export const NON_RETRYABLE_OPERATIONS: ReadonlySet<BkashOperation> = new Set([
   'executePayment',
   'refund',
+  'capturePayment',
+  'voidPayment',
 ]);
 
 export interface LogEntry {

@@ -47,6 +47,7 @@ export function parseCallback(query: CallbackQuery): ParsedCallback {
 
 export type CallbackOutcome =
   | { status: 'completed'; paymentId: string; payment: ExecuteResult }
+  | { status: 'authorized'; paymentId: string; payment: ExecuteResult }
   | { status: 'not_completed'; paymentId: string; payment: ExecuteResult }
   | { status: 'failure' | 'cancel'; paymentId: string }
   | { status: 'error'; paymentId: string | undefined; error: BkashError };
@@ -66,6 +67,9 @@ export interface HandleCallbackOptions extends ExecuteOptions {
  * The `status` query parameter comes from the customer's browser and can be
  * edited, so it is never trusted on its own: `success` is only reported as
  * `completed` after Execute Payment (or Query Payment) says `Completed`.
+ * A payment created with `intent: 'authorization'` is reported as
+ * `authorized` once bKash holds the amount; finish it with
+ * `capturePayment()` or `voidPayment()`.
  */
 export async function handleCallback(
   client: BkashClient,
@@ -81,11 +85,13 @@ export async function handleCallback(
   if (parsed.status !== 'success') return { status: parsed.status, paymentId: parsed.paymentId };
   try {
     const payment = await client.executePayment(parsed.paymentId, options);
-    return {
-      status: payment.transactionStatus === 'Completed' ? 'completed' : 'not_completed',
-      paymentId: parsed.paymentId,
-      payment,
-    };
+    const status =
+      payment.transactionStatus === 'Completed'
+        ? 'completed'
+        : payment.transactionStatus === 'Authorized'
+          ? 'authorized'
+          : 'not_completed';
+    return { status, paymentId: parsed.paymentId, payment };
   } catch (error) {
     const err =
       error instanceof BkashError

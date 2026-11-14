@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Auth & Capture: `capturePayment()` and `voidPayment()` for payments created with `intent: 'authorization'`, with
+  `capturePayment`/`voidPayment` entries in `V2_PATHS` and `NON_RETRYABLE_OPERATIONS`.
+- Capture/void guard sharing the `idempotencyStore` (key `confirm:<paymentId>`): concurrent calls share one request,
+  repeats return the stored result with `source: 'cache'`, and capture-after-void or void-after-capture throws the new
+  `BkashConfirmConflictError` without calling bKash.
+- Capture/void recovery through Query Payment after a timeout, network error or "already completed".
+- `expectedAmount` on `capturePayment()`.
+- `handleCallback()` returns `status: 'authorized'` when Execute reports `Authorized`.
+- `ConfirmResult`, `CaptureOptions`, `VoidOptions`, `ConfirmAction` and `ConfirmPaymentResponse` types.
+- Example: `examples/capture.mjs`.
+
+### Changed
+
+- `handleCallback()` reports an `Authorized` payment as `authorized` instead of `not_completed`.
+- Execute recovery accepts `Authorized` from Query Payment as a successful execute, so a timed-out execute of an
+  authorization payment is no longer left locked.
+- `BkashAmountMismatchError` takes an optional `operation` (default `executePayment`).
+
 ## [0.1.0] - 2026-11-12
 
 ### Added
